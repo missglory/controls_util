@@ -14,37 +14,62 @@ using namespace std;
 struct UserData{
     cv::Mat image;
     cv::Mat orig;
-    std::vector<cv::Point2f> points;
+    std::vector<cv::Point2f> points; //perimetr
     std::vector<double> ratio;
-    std::vector<cv::Point2f> shape;
-    std::vector<double> dist;
-    std::vector<float> knots;
+    std::vector<cv::Point2f> shape; //68 landmarks
     std::vector<cv::Point2f> controls;
-    cv::Mat Nx;
-    std::vector<cv::Point2f> pts;
-    int quantize;
+    cv::RotatedRect ellipse;
+    std::vector<double> dist;
 };
 
+cv::Mat mask;
+cv::Mat mask2;
 
-float N(const std::vector<float> &knot, float t, int k, int q)
+cv::Mat anglemask;
+
+cv::Point2f rot(cv::Point2f p, float a)
 {
-    if (q == 1) return (t >= knot[k] && t < knot[k + 1]) ? 1.f : 0.f;
-
-    float div1 = knot[k + q - 1] - knot[k];
-    float div2 = knot[k + q] - knot[k + 1];
-    float val1 = (div1 != 0) ? (t - knot[k]) * N(knot, t, k, q - 1) / div1 : 0;
-    float val2 = (div2 != 0) ? (knot[k + q] - t) * N(knot, t, k + 1, q - 1) / div2 : 0;
-
-    return val1 + val2;
+    return cv::Point2f(p.x * std::cos(a) - p.y * std::sin(a),
+                       p.x * std::sin(a) + p.y * std::cos(a));
 }
 
-cv::Point2f ComputePoint(const cv::Mat& Nx, const std::vector<cv::Point2f>& controls, int x)
+cv::Point2f ellipsePoint(cv::RotatedRect& ell, float angle)
 {
-    cv::Point2f ret;
-    for (int i = 0; i < Nx.rows; i++) {
-        ret += Nx.at<float>(i, x) * controls[i];
+    return ell.center + rot(cv::Point2f(ell.size.width/2.f * std::cos(angle), ell.size.height/2.f * std::sin(angle)), ell.angle / 180.f * 3.14f);
+}
+
+
+float getratio(UserData& ud, cv::Mat& contour, float angle)
+{
+    cv::Point2f elp = ellipsePoint(ud.ellipse, angle);
+    mask2 = cv::Mat::zeros(ud.image.rows, ud.image.cols, CV_32F);
+    cv::Point2f vec = (elp - ud.ellipse.center) * 3.0f;
+    cv::line(mask2, ud.ellipse.center, vec + ud.ellipse.center, cv::Scalar(1.0), 2);
+
+    cv::multiply(contour, mask2, mask2);
+
+    cv::Point2f pt(-1.f, -1.f);
+    for (int x = 0; x < mask2.cols; x++){
+        for (int y = 0; y < mask2.rows; y++){
+            if (mask2.at<float>(y,x) > 0.9f){
+                pt = {(float)x,(float)y};
+                break;
+            }
+        }
+        if (pt.x > 0.f)
+            break;
     }
-    return ret;
+
+//    cv::Mat testMask;
+//    mask2.copyTo(testMask);
+//    testMask += contour / 3.0f;
+//    cv::circle(testMask, elp, 2, cv::Scalar(1.f), 3);
+//    cv::circle(testMask, ud.ellipse.center, 2, cv::Scalar(.5f), 3);
+//    cv::circle(testMask, pt, 2, cv::Scalar(.8f), 3);
+
+//    imshow("am", testMask);
+
+    return cv::norm(pt - ud.ellipse.center) / cv::norm(elp - ud.ellipse.center);
 }
 
 
@@ -59,13 +84,16 @@ void mouse_callback(int event, int x, int y, int flags, void* userdata)
     float w			= image.cols;
     float h			= image.rows;
 
+    mask = cv::Mat::zeros(image.rows, image.cols, CV_32F);
+    mask2 = cv::Mat::zeros(image.rows, image.cols, CV_32F);
+
     if (event == cv::EVENT_LBUTTONUP) {
         activeCP = -1;
     }
     if (event == cv::EVENT_LBUTTONDOWN)
     {
-        for (int i = 0; i < 16; i++) {
-            if (cv::norm(currentP - ud->points[i]) < 5) {
+        for (int i = 0; i < ud->controls.size(); i++) {
+            if (cv::norm(currentP - ud->controls[i]) < 5) {
                 activeCP = i;
                 break;
             }
@@ -75,26 +103,35 @@ void mouse_callback(int event, int x, int y, int flags, void* userdata)
     if (event == cv::EVENT_MOUSEMOVE && (flags & cv::EVENT_FLAG_LBUTTON)) {
         if (activeCP > -1)
         {
-            ud->points[activeCP] = currentP;
             ud->controls[activeCP] = currentP;
-            ud->controls[(activeCP + ud->points.size())%ud->controls.size()] = currentP;
             ud->ratio[activeCP] = cv::norm(currentP - ud->shape[33]) / ud->dist[activeCP];
             orig.copyTo(image);
-            for (auto pt : ud->points)
+
+            std::vector<std::vector<cv::Point> > ctr(1);
+            for (int i = 0; i < ud->controls.size(); i++)
+            {
+                ctr[0].push_back(ud->controls[i]);
+            }
+
+            cv::drawContours(image, ctr, 0, cv::Scalar(120, 0, 0));
+            cv::drawContours(mask, ctr, 0, cv::Scalar(1.f));
+
+//            getratio(*ud, mask, 0.4f);
+
+
+            for (auto pt : ud->controls)
             {
                 cv::circle(image, pt, 2, cv::Scalar(0, 255, 0), 3);
             }
-            for (int i = 0; i < 16; i++)
+
+            int quant = 50;
+            for (float i = 0; i < quant; i++)
             {
-                double val = ud->ratio[i];
-                cv::line(image, cv::Point2d(w/1.5 + i / 16.0 * w/3.0, val * 100), cv::Point2d(w/1.5 + i / 16.0 * w/3.0, 0), cv::Scalar(255), 5);
+                float t = 3.14f * i / quant * 2.f;
+                float val = getratio(*ud, mask, t);
+                cv::line(image, cv::Point2d(w/1.5 + i / quant * w/3.0, val * 100), cv::Point2d(w/1.5 + i / quant * w/3.0, 0), cv::Scalar(255), 2);
             }
 
-            for(int i = ud->knots[1] * ud->quantize; i < ud->knots[ud->knots.size() - 3] * ud->quantize; i++)
-            {
-                ud->pts[i] = ComputePoint(ud->Nx, ud->controls, i);
-                cv::circle(image, ud->pts[i], 1, cv::Scalar(255), 2);
-            }
             cv::imshow("show", image);
         }
     }
@@ -133,13 +170,8 @@ int main()
         for (unsigned j = 0; j < shape_dlib.num_parts(); j++) ud.shape.push_back(cv::Point(shape_dlib.part(j).x(), shape_dlib.part(j).y()));
     }
     auto& face = faces_dlib[0];
-//    cv::rectangle(img, cv::Point{(int)face.left(), (int)face.top()},
-//                  cv::Point{(int)face.right(), (int)face.bottom()}, cv::Scalar{255,0,0});
-
-
 
     ud.image = img;
-
 
     int ptSize = 16;
     ud.points.resize(ptSize);
@@ -151,48 +183,53 @@ int main()
         ud.dist[i] = cv::norm(pt - ud.shape[33]);
     }
 
-    cv::RotatedRect elps = fitEllipse( cv::Mat(ud.points) );
-    cv::ellipse(img, elps, cv::Scalar(50,50,50), 2, 8);
-
-
+    ud.ellipse = fitEllipse( cv::Mat(ud.points) );
+    cv::ellipse(img, ud.ellipse, cv::Scalar(50,50,50), 2, 8);
 
     img.copyTo(ud.orig);
-    for (auto pt : ud.points)
-    {
-        cv::circle(img, pt, 2, cv::Scalar(0, 255, 0), 3);
-    }
 
-    ud.ratio = std::vector<double>(ptSize, 1.0);
+    int controlsSize = 30;
+    ud.controls.resize(controlsSize);
 
-    ud.controls = ud.points;
-    int n_u_add = 3;
-    int n_u = ud.controls.size() + n_u_add, n_v = 4, n_u_active = n_u - n_u_add;
-    ud.controls.resize(n_u);
-    for (int i = 0; i < n_u_add; i++)
+    ud.ratio = std::vector<double>(controlsSize, 1.0);
+
+    for (int i = 0; i < controlsSize; i++)
     {
-        ud.controls[n_u - i - 1] = ud.controls[n_u_add - 1 - i];
-    }
-    const int q = 4;
-    int kx_size = n_u + q;
-    ud.knots.resize(kx_size, 0.f);
-    for (int i = 0; i < kx_size; i++) {
-        ud.knots[i] = i / (kx_size - 1.f);
-    }
-    ud.quantize = 1024;
-    ud.Nx = cv::Mat(n_u, ud.quantize, CV_32FC1);
-    for (int i = 0; i < n_u; i++) {
-        for (int t = 0; t < ud.quantize; t++) {
-            ud.Nx.at<float>(i, t) = N(ud.knots, t / (ud.quantize - 1.f), i, q);
-        }
-    }
-    ud.pts.resize(ud.quantize);
-    for(int i = ud.knots[2] * ud.quantize; i < ud.knots[ud.knots.size() - 1] * ud.quantize; i++)
-    {
-        ud.pts[i] = ComputePoint(ud.Nx, ud.controls, i);
-        cv::circle(img, ud.pts[i], 1, cv::Scalar(255), 2);
+        float t = 3.14f * i / controlsSize * 2.f;
+        ud.controls[i] = ellipsePoint(ud.ellipse, t);
+        cv::circle(img, ud.controls[i], 2, cv::Scalar(255, 0, 0), 3);
     }
     cv::imshow("show", img);
 
+    cv::namedWindow("am");
+    anglemask = cv::Mat(img.rows, img.cols, CV_32F);
+    for (int x = 0; x < anglemask.cols; x+=20)
+    {
+        for (int y = 0; y < anglemask.rows; y+=20)
+        {
+            cv::Point2f vec(x, y);
+            vec -= ud.ellipse.center;
+            float val = 0.f;
+            if (vec.x < 0.01 && vec.x > -0.01)
+            {
+                if (vec.y > 0.f)
+                    val = 3.14f / 2.f;
+                else {
+                    val = -3.14f / 2.f;
+                }
+            } else {
+                val = std::atan(vec.y/vec.x);
+            }
+            if (vec.x < 0.f && vec.y < 0.f)
+                val += 3.14f * 1.5f;
+            if (vec.x < 0.f && vec.y > 0.f)
+                val += 3.14f;
+
+            anglemask.at<float>(x,y) = val;
+            std::cout << std::setprecision(2) << val << " ";
+        }
+        std::cout << std::endl;
+    }
 
     cv::setMouseCallback("show", mouse_callback, &ud);
     cv::waitKey();
