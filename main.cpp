@@ -8,6 +8,7 @@
 #include <opencv2/imgproc.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgcodecs.hpp>
+#include <math.h>
 using namespace std;
 
 
@@ -18,11 +19,12 @@ struct UserData{
     std::vector<double> ratio;
     std::vector<cv::Point2f> shape;
     std::vector<double> dist;
-    std::vector<float> knots;
-    std::vector<cv::Point2f> controls;
-    cv::Mat Nx;
-    std::vector<cv::Point2f> pts;
+    std::vector< std::vector<cv::Point> > controls;
     int quantize;
+    cv::Mat Nx;
+    std::vector<float> knots;
+    std::vector<cv::Point2f> pts;
+    cv::RotatedRect ellipse;
 };
 
 
@@ -38,11 +40,20 @@ float N(const std::vector<float> &knot, float t, int k, int q)
     return val1 + val2;
 }
 
-cv::Point2f ComputePoint(const cv::Mat& Nx, const std::vector<cv::Point2f>& controls, int x)
+cv::Point2f ComputePoint(const cv::Mat& Nx, const std::vector<cv::Point>& controls, int x)
 {
+    float norm;
+    for (int i = 0; i < Nx.rows; i++) {
+        cv::Point2f control = {(float)controls[i].x, (float)controls[i].y};
+        norm += Nx.at<float>(i, x);
+    }
+    if (norm < 0.99999)
+        return cv::Point2f{-1.f, -1.f};
+
     cv::Point2f ret;
     for (int i = 0; i < Nx.rows; i++) {
-        ret += Nx.at<float>(i, x) * controls[i];
+        cv::Point2f control = {(float)controls[i].x, (float)controls[i].y};
+        ret += Nx.at<float>(i, x) * control;
     }
     return ret;
 }
@@ -51,7 +62,7 @@ cv::Point2f ComputePoint(const cv::Mat& Nx, const std::vector<cv::Point2f>& cont
 void mouse_callback(int event, int x, int y, int flags, void* userdata)
 {
     static int activeCP = -1;
-    cv::Point2f currentP(x, y);
+    cv::Point currentP(x, y);
     UserData* ud = (UserData*)userdata;
 
     cv::Mat& image		= ud->image;
@@ -64,8 +75,8 @@ void mouse_callback(int event, int x, int y, int flags, void* userdata)
     }
     if (event == cv::EVENT_LBUTTONDOWN)
     {
-        for (int i = 0; i < 16; i++) {
-            if (cv::norm(currentP - ud->points[i]) < 5) {
+        for (int i = 0; i < ud->controls[0].size() - 8; i++) {
+            if (cv::norm(currentP - ud->controls[0][i]) < 5) {
                 activeCP = i;
                 break;
             }
@@ -75,25 +86,47 @@ void mouse_callback(int event, int x, int y, int flags, void* userdata)
     if (event == cv::EVENT_MOUSEMOVE && (flags & cv::EVENT_FLAG_LBUTTON)) {
         if (activeCP > -1)
         {
-            ud->points[activeCP] = currentP;
-            ud->controls[activeCP] = currentP;
-            ud->controls[(activeCP + ud->points.size())%ud->controls.size()] = currentP;
-            ud->ratio[activeCP] = cv::norm(currentP - ud->shape[33]) / ud->dist[activeCP];
-            orig.copyTo(image);
-            for (auto pt : ud->points)
+            ud->controls[0][activeCP] = currentP;
+            if (activeCP < 8 || activeCP >= ud->controls[0].size() - 8)
             {
-                cv::circle(image, pt, 2, cv::Scalar(0, 255, 0), 3);
+                int secondInd = (activeCP + ud->controls[0].size() - 8)%ud->controls[0].size();
+                ud->controls[0][secondInd] = currentP;
             }
-            for (int i = 0; i < 16; i++)
+            ud->ratio[activeCP] = cv::norm(currentP - cv::Point(ud->shape[33])) / ud->dist[activeCP];
+            orig.copyTo(image);
+
+
+            for(int i = ud->knots[4] * (ud->quantize-1); i < ud->knots[ud->knots.size() - 4] * (ud->quantize-1); i++)
             {
-                double val = ud->ratio[i];
-                cv::line(image, cv::Point2d(w/1.5 + i / 16.0 * w/3.0, val * 100), cv::Point2d(w/1.5 + i / 16.0 * w/3.0, 0), cv::Scalar(255), 5);
+                ud->pts[i] = ComputePoint(ud->Nx, ud->controls[0], i);
+
+                if (ud->pts[i].x > 0.f)
+                {
+                    float t = 3.14f * i / ud->quantize * 2.f + ud->ellipse.angle / 180.f * 3.14;
+                    cv::Point2f pt(ud->ellipse.size.width/2.f * std::cos(t),
+                                   ud->ellipse.size.height/2.f * std::sin(t));
+                    ud->ratio[i] = cv::norm(ud->pts[i] - ud->ellipse.center) / cv::norm(pt);
+                    double val = ud->ratio[i];
+                    cv::line(image, cv::Point2d(1 + w/1.1f * i / ud->quantize, val * 60),
+                                    cv::Point2d(1 + w/1.1f * i / ud->quantize, 0), cv::Scalar(255), 2);
+
+//                     cv::circle(image, ud->pts[i], 1, cv::Scalar(255), 2);
+                }
+
             }
 
-            for(int i = ud->knots[1] * ud->quantize; i < ud->knots[ud->knots.size() - 3] * ud->quantize; i++)
+            std::vector<std::vector<cv::Point> > pnts(1);
+            pnts.reserve(ud->quantize / 2);
+            for (int i = 0; i < ud->pts.size(); i++)
             {
-                ud->pts[i] = ComputePoint(ud->Nx, ud->controls, i);
-                cv::circle(image, ud->pts[i], 1, cv::Scalar(255), 2);
+                if (ud->pts[i].x > 0.f) pnts[0].push_back(cv::Point(ud->pts[i]));
+            }
+            cv::drawContours(image, pnts, 0, cv::Scalar(0,255,0), 2);
+
+            for (int i = 0; i < ud->controls[0].size(); i++)
+            {
+                auto pt = ud->controls[0][i];
+                cv::circle(image, pt, 2, cv::Scalar(0, 0, 255), 3);
             }
             cv::imshow("show", image);
         }
@@ -135,11 +168,7 @@ int main()
     auto& face = faces_dlib[0];
 //    cv::rectangle(img, cv::Point{(int)face.left(), (int)face.top()},
 //                  cv::Point{(int)face.right(), (int)face.bottom()}, cv::Scalar{255,0,0});
-
-
-
     ud.image = img;
-
 
     int ptSize = 16;
     ud.points.resize(ptSize);
@@ -151,26 +180,35 @@ int main()
         ud.dist[i] = cv::norm(pt - ud.shape[33]);
     }
 
-    cv::RotatedRect elps = fitEllipse( cv::Mat(ud.points) );
-    cv::ellipse(img, elps, cv::Scalar(50,50,50), 2, 8);
-
-
+    ud.ellipse = fitEllipse( cv::Mat(ud.points) );
+    cv::ellipse(img, ud.ellipse, cv::Scalar(50,50,50), 2, 8);
 
     img.copyTo(ud.orig);
-    for (auto pt : ud.points)
+    for (int i = 0; i < ud.points.size(); i++)
     {
-        cv::circle(img, pt, 2, cv::Scalar(0, 255, 0), 3);
+        auto pt = ud.points[i];
+//        cv::circle(img, pt, 2, cv::Scalar(255 - (float)i/ud.points.size() * 255, (float)i/ud.points.size() * 255, 0), 3);
     }
 
-    ud.ratio = std::vector<double>(ptSize, 1.0);
 
-    ud.controls = ud.points;
-    int n_u_add = 3;
-    int n_u = ud.controls.size() + n_u_add, n_v = 4, n_u_active = n_u - n_u_add;
-    ud.controls.resize(n_u);
+    int controlsSize = 50;
+    ud.controls.resize(1);
+    ud.controls[0].resize(controlsSize);
+    for (int i = 0; i < controlsSize; i++)
+    {
+        float t = 3.14f * i / controlsSize * 2.f + ud.ellipse.angle / 180.f * 3.14;
+        ud.controls[0][i] = ud.ellipse.center + cv::Point2f(ud.ellipse.size.width/2.f * std::cos(t),
+                                                    ud.ellipse.size.height/2.f * std::sin(t)) * 1.2;
+        cv::circle(img, ud.controls[0][i], 2, cv::Scalar(255, 0, 0), 3);
+    }
+//    cv::drawContours(img, ud.controls, 0, cv::Scalar(0,255,0), 2);
+
+    int n_u_add = 8;
+    int n_u = ud.controls[0].size() + n_u_add;
+    ud.controls[0].resize(n_u);
     for (int i = 0; i < n_u_add; i++)
     {
-        ud.controls[n_u - i - 1] = ud.controls[n_u_add - 1 - i];
+        ud.controls[0][n_u - i - 1] = ud.controls[0][n_u_add - 1 - i];
     }
     const int q = 4;
     int kx_size = n_u + q;
@@ -186,13 +224,22 @@ int main()
         }
     }
     ud.pts.resize(ud.quantize);
-    for(int i = ud.knots[2] * ud.quantize; i < ud.knots[ud.knots.size() - 1] * ud.quantize; i++)
+    for(int i = ud.knots[4] * (ud.quantize-1); i < ud.knots[ud.knots.size() - 4] * (ud.quantize-1); i++)
     {
-        ud.pts[i] = ComputePoint(ud.Nx, ud.controls, i);
-        cv::circle(img, ud.pts[i], 1, cv::Scalar(255), 2);
+        ud.pts[i] = ComputePoint(ud.Nx, ud.controls[0], i);
+        if (ud.pts[i].x > 0.f)
+            cv::circle(img, ud.pts[i], 1, cv::Scalar(255), 2);
     }
-    cv::imshow("show", img);
+    ud.ratio = std::vector<double>(ud.quantize, 1.0);
+    for (int i = 0; i < ud.quantize; i++)
+    {
+        float t = 3.14f * i / ud.quantize * 2.f + ud.ellipse.angle / 180.f * 3.14;
+        cv::Point2f pt(ud.ellipse.size.width/2.f * std::cos(t),
+                       ud.ellipse.size.height/2.f * std::sin(t));
+        ud.ratio[i] = cv::norm(ud.pts[i] - ud.ellipse.center) / cv::norm(pt);
+    }
 
+    cv::imshow("show", img);
 
     cv::setMouseCallback("show", mouse_callback, &ud);
     cv::waitKey();
