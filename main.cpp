@@ -42,13 +42,13 @@ float N(const std::vector<float> &knot, float t, int k, int q)
 
 cv::Point2f ComputePoint(const cv::Mat& Nx, const std::vector<cv::Point>& controls, int x)
 {
-    float norm;
+    float norm = 0.f;
     for (int i = 0; i < Nx.rows; i++) {
         cv::Point2f control = {(float)controls[i].x, (float)controls[i].y};
         norm += Nx.at<float>(i, x);
     }
     if (norm < 0.99999)
-        return cv::Point2f{-1.f, -1.f};
+        return cv::Point2f(1000.f, 1000.f);
 
     cv::Point2f ret;
     for (int i = 0; i < Nx.rows; i++) {
@@ -58,6 +58,15 @@ cv::Point2f ComputePoint(const cv::Mat& Nx, const std::vector<cv::Point>& contro
     return ret;
 }
 
+float CP(const cv::Mat& Nx, const std::vector<cv::Point>& controls, int x)
+{
+    float norm = 0.f;
+    for (int i = 0; i < Nx.rows; i++) {
+        cv::Point2f control = {(float)controls[i].x, (float)controls[i].y};
+        norm += Nx.at<float>(i, x);
+    }
+    return norm;
+}
 
 void mouse_callback(int event, int x, int y, int flags, void* userdata)
 {
@@ -75,7 +84,7 @@ void mouse_callback(int event, int x, int y, int flags, void* userdata)
     }
     if (event == cv::EVENT_LBUTTONDOWN)
     {
-        for (int i = 0; i < ud->controls[0].size() - 8; i++) {
+        for (int i = 0; i < ud->controls[0].size() - 6; i++) {
             if (cv::norm(currentP - ud->controls[0][i]) < 5) {
                 activeCP = i;
                 break;
@@ -87,16 +96,16 @@ void mouse_callback(int event, int x, int y, int flags, void* userdata)
         if (activeCP > -1)
         {
             ud->controls[0][activeCP] = currentP;
-            if (activeCP < 8 || activeCP >= ud->controls[0].size() - 8)
+            if (activeCP < 6 || activeCP >= ud->controls[0].size() - 6)
             {
-                int secondInd = (activeCP + ud->controls[0].size() - 8)%ud->controls[0].size();
+                int secondInd = (activeCP + ud->controls[0].size() - 6)%ud->controls[0].size();
                 ud->controls[0][secondInd] = currentP;
             }
             ud->ratio[activeCP] = cv::norm(currentP - cv::Point(ud->shape[33])) / ud->dist[activeCP];
             orig.copyTo(image);
 
 
-            for(int i = ud->knots[4] * (ud->quantize-1); i < ud->knots[ud->knots.size() - 4] * (ud->quantize-1); i++)
+            for(int i = ud->knots[3] * (ud->quantize-1); i < ud->knots[ud->knots.size() - 4] * (ud->quantize-1); i++)
             {
                 ud->pts[i] = ComputePoint(ud->Nx, ud->controls[0], i);
 
@@ -203,7 +212,7 @@ int main()
     }
 //    cv::drawContours(img, ud.controls, 0, cv::Scalar(0,255,0), 2);
 
-    int n_u_add = 8;
+    int n_u_add = 6;
     int n_u = ud.controls[0].size() + n_u_add;
     ud.controls[0].resize(n_u);
     for (int i = 0; i < n_u_add; i++)
@@ -224,7 +233,15 @@ int main()
         }
     }
     ud.pts.resize(ud.quantize);
-    for(int i = ud.knots[4] * (ud.quantize-1); i < ud.knots[ud.knots.size() - 4] * (ud.quantize-1); i++)
+
+    std::vector<float> cp(ud.quantize);
+
+    for (int i = 0; i < ud.quantize; i++)
+    {
+        cp[i] = CP(ud.Nx, ud.controls[0], i);
+    }
+
+    for(int i = ud.knots[3] * (ud.quantize-1); i < ud.knots[ud.knots.size() - 4] * (ud.quantize-1); i++)
     {
         ud.pts[i] = ComputePoint(ud.Nx, ud.controls[0], i);
         if (ud.pts[i].x > 0.f)
